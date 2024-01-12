@@ -2,11 +2,6 @@
 
 import os
 import sys
-# single thread doubles cuda performance - needs to be set before torch import
-if any(arg.startswith('--execution-provider') for arg in sys.argv):
-    os.environ['OMP_NUM_THREADS'] = '1'
-# reduce tensorflow log level
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import warnings
 from typing import List
 import platform
@@ -29,9 +24,9 @@ warnings.filterwarnings('ignore', category=UserWarning, module='torchvision')
 def parse_args() -> None:
     signal.signal(signal.SIGINT, lambda signal_number, frame: destroy())
     program = argparse.ArgumentParser(formatter_class=lambda prog: argparse.HelpFormatter(prog, max_help_position=100))
-    program.add_argument('-s', '--source', help='select an source image', dest='source_path')
-    program.add_argument('-t', '--target', help='select an target image or video', dest='target_path')
-    program.add_argument('-o', '--output', help='select output file or directory', dest='output_path')
+    program.add_argument('-s', '--source', help='select a source image', dest='source_path')
+    program.add_argument('-t', '--target', help='select a target image or video', dest='target_path')
+    program.add_argument('-o', '--output', help='select an output file or directory', dest='output_path')
     program.add_argument('--frame-processor', help='frame processors (choices: face_swapper, face_enhancer, ...)', dest='frame_processor', default=['face_swapper'], nargs='+')
     program.add_argument('--keep-fps', help='keep target fps', dest='keep_fps', action='store_true')
     program.add_argument('--keep-frames', help='keep temporary frames', dest='keep_frames', action='store_true')
@@ -45,7 +40,8 @@ def parse_args() -> None:
     program.add_argument('--output-video-encoder', help='encoder used for the output video', dest='output_video_encoder', default='libx264', choices=['libx264', 'libx265', 'libvpx-vp9', 'h264_nvenc', 'hevc_nvenc'])
     program.add_argument('--output-video-quality', help='quality used for the output video', dest='output_video_quality', type=int, default=35, choices=range(101), metavar='[0-100]')
     program.add_argument('--max-memory', help='maximum amount of RAM in GB', dest='max_memory', type=int)
-    program.add_argument('--execution-provider', help='available execution provider (choices: cpu, ...)', dest='execution_provider', default=['cpu'], choices=suggest_execution_providers(), nargs='+')
+    program.add_argument('--execution-provider-gpu-0', help='execution provider for GPU 0', dest='execution_provider_gpu_0', default='cuda', choices=suggest_execution_providers())
+    program.add_argument('--execution-provider-gpu-1', help='execution provider for GPU 1', dest='execution_provider_gpu_1', default='cuda', choices=suggest_execution_providers())
     program.add_argument('--execution-threads', help='number of execution threads', dest='execution_threads', type=int, default=suggest_execution_threads())
     program.add_argument('-v', '--version', action='version', version=f'{roop.metadata.name} {roop.metadata.version}')
 
@@ -68,7 +64,8 @@ def parse_args() -> None:
     roop.globals.output_video_encoder = args.output_video_encoder
     roop.globals.output_video_quality = args.output_video_quality
     roop.globals.max_memory = args.max_memory
-    roop.globals.execution_providers = decode_execution_providers(args.execution_provider)
+    roop.globals.execution_providers_gpu_0 = decode_execution_providers([args.execution_provider_gpu_0])
+    roop.globals.execution_providers_gpu_1 = decode_execution_providers([args.execution_provider_gpu_1])
     roop.globals.execution_threads = args.execution_threads
 
 
@@ -77,8 +74,17 @@ def encode_execution_providers(execution_providers: List[str]) -> List[str]:
 
 
 def decode_execution_providers(execution_providers: List[str]) -> List[str]:
-    return [provider for provider, encoded_execution_provider in zip(onnxruntime.get_available_providers(), encode_execution_providers(onnxruntime.get_available_providers()))
-            if any(execution_provider in encoded_execution_provider for execution_provider in execution_providers)]
+    decoded_providers = []
+    for provider, encoded_execution_provider in zip(onnxruntime.get_available_providers(), encode_execution_providers(onnxruntime.get_available_providers())):
+        if 'cuda' in encoded_execution_provider:
+            if '0' in execution_providers:
+                decoded_providers.append(provider)
+            if '1' in execution_providers:
+                decoded_providers.append(provider)
+        else:
+            if any(execution_provider in encoded_execution_provider for execution_provider in execution_providers):
+                decoded_providers.append(provider)
+    return decoded_providers
 
 
 def suggest_execution_providers() -> List[str]:
@@ -94,13 +100,14 @@ def suggest_execution_threads() -> int:
 def limit_resources() -> None:
     # prevent tensorflow memory leak
     gpus = tensorflow.config.experimental.list_physical_devices('GPU')
-    for gpu in gpus:
-        tensorflow.config.experimental.set_virtual_device_configuration(gpu, [
-            tensorflow.config.experimental.VirtualDeviceConfiguration(memory_limit=1024)
-        ])
+    if gpus:
+        for gpu in gpus:
+            tensorflow.config.experimental.set_virtual_device_configuration(gpu, [
+                tensorflow.config.experimental.VirtualDeviceConfiguration(memory_limit=1024)
+            ])
     # limit memory usage
     if roop.globals.max_memory:
-        memory = roop.globals.max_memory * 1024 ** 3
+        memory = roop.globals.max_memory * 1024 ** 5
         if platform.system().lower() == 'darwin':
             memory = roop.globals.max_memory * 1024 ** 6
         if platform.system().lower() == 'windows':
